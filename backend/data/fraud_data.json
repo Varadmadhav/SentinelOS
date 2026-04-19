@@ -1,0 +1,86 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "description": "SentinelOS local fraud database seed data",
+    "last_updated": "2024-01-01T00:00:00Z",
+    "sources": ["manual", "reported", "imported"]
+  },
+  "phone_numbers": [
+    {
+      "number": "+919999999999",
+      "tags": ["otp_scam", "impersonation"],
+      "severity": "high",
+      "reported_count": 142,
+      "added_at": "2024-01-01T00:00:00Z",
+      "source": "reported"
+    },
+    {
+      "number": "+918888888888",
+      "tags": ["fake_kyc", "bank_fraud"],
+      "severity": "critical",
+      "reported_count": 89,
+      "added_at": "2024-01-02T00:00:00Z",
+      "source": "reported"
+    },
+    {
+      "number": "+917777777777",
+      "tags": ["lottery_scam"],
+      "severity": "medium",
+      "reported_count": 34,
+      "added_at": "2024-01-03T00:00:00Z",
+      "source": "manual"
+    }
+  ],
+  "upi_ids": [
+    {
+      "upi_id": "scammer@ybl",
+      "tags": ["fake_merchant", "advance_fee"],
+      "severity": "critical",
+      "reported_count": 201,
+      "added_at": "2024-01-01T00:00:00Z",
+      "source": "reported"
+    },
+    {
+      "upi_id": "fraud.pay@okicici",
+      "tags": ["impersonation"],
+      "severity": "high",
+      "reported_count": 57,
+      "added_at": "2024-01-02T00:00:00Z",
+      "source": "manual"
+    },
+    {
+      "upi_id": "fakebank@paytm",
+      "tags": ["fake_kyc", "bank_fraud"],
+      "severity": "high",
+      "reported_count": 73,
+      "added_at": "2024-01-03T00:00:00Z",
+      "source": "imported"
+    }
+  ],
+  "urls": [
+    {
+      "url": "http://fake-sbi-kyc.com",
+      "tags": ["phishing", "fake_bank"],
+      "severity": "critical",
+      "reported_count": 312,
+      "added_at": "2024-01-01T00:00:00Z",
+      "source": "reported"
+    },
+    {
+      "url": "http://win-iphone15-free.xyz",
+      "tags": ["lottery_scam", "malware"],
+      "severity": "high",
+      "reported_count": 98,
+      "added_at": "2024-01-02T00:00:00Z",
+      "source": "manual"
+    },
+    {
+      "url": "https://hdfc-update-account.net",
+      "tags": ["phishing", "fake_bank"],
+      "severity": "critical",
+      "reported_count": 445,
+      "added_at": "2024-01-01T00:00:00Z",
+      "source": "imported"
+    }
+  ]
+}
