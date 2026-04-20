@@ -1,7 +1,5 @@
 import { Request, Response } from "express";
-import axios from "axios";
-
-const AI_ENGINE_URL = process.env.AI_ENGINE_URL || "http://localhost:8000";
+import { analyzeScreen as analyzeScreenML } from "../services/mlService";
 
 // POST /api/screen/analyze
 export const analyzeScreen = async (req: Request, res: Response) => {
@@ -12,50 +10,25 @@ export const analyzeScreen = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "screen_text is required" });
     }
 
-    // Call Python screen_analyzer directly via score-event
-    const aiResponse = await axios.post(`${AI_ENGINE_URL}/score-event`, {
-      source: "screen_shield",
-      signals: {
-        // Map screen analysis into scoring signals
-        urgency_language: /limited time|offer expires|hurry|act now|only \d+ left/i.test(screen_text),
-        raw_text_snippet: screen_text.slice(0, 500),
-        entity_value: "",
-      },
-    });
+    const result = await analyzeScreenML(screen_text, ui_elements);
 
-    const raw = aiResponse.data;
-
-    // Also run our detailed screen_analyzer for pattern breakdown
-    let screenPatterns: any[] = [];
-    try {
-      const screenRes = await axios.post(`${AI_ENGINE_URL}/analyze-screen`, {
-        screen_text,
-        ui_elements,
-      });
-      screenPatterns = screenRes.data?.patterns ?? [];
-    } catch {
-      // analyze-screen endpoint may not exist in all versions — graceful fallback
-    }
-
-    const risk_score = Math.max(raw.score ?? 0, screenPatterns.length * 15);
+    const risk_score = result.risk_score;
     const risk_level =
       risk_score >= 70 ? "DANGEROUS" :
       risk_score >= 40 ? "SUSPICIOUS" :
       risk_score >= 15 ? "LOW_RISK" : "SAFE";
 
     return res.json({
-      dark_patterns_found: screenPatterns.length > 0 || risk_score > 15,
+      dark_patterns_found: result.dark_patterns_found,
       risk_score,
       risk_level,
-      patterns: screenPatterns,
-      summary: screenPatterns.length > 0
-        ? `${screenPatterns.length} dark pattern(s) detected`
-        : "No dark patterns detected.",
-      explanation: screenPatterns.length > 0
-        ? `Detected: ${screenPatterns.map((p: any) => p.type).join(", ")}`
+      patterns: result.patterns,
+      summary: result.summary,
+      explanation: result.dark_patterns_found
+        ? `Detected: ${result.pattern_types.join(", ")}`
         : "Screen content appears normal.",
-      _raw: raw,
     });
+
   } catch (error: any) {
     console.error("Screen analysis error:", error?.response?.data ?? error.message);
     return res.status(500).json({ error: "Failed to analyze screen" });

@@ -8,7 +8,7 @@ import axios from "axios";
 
 const API = import.meta.env.VITE_API_URL
   ? `${import.meta.env.VITE_API_URL}/api/app`
-  : "http://localhost:3000/api/app";
+  : "http://localhost:8000/api/app";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

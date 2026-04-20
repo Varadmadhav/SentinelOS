@@ -8,6 +8,7 @@
     "start": "node dist/app.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
     "axios": "^1.15.1",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
