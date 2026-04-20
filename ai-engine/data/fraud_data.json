@@ -55,6 +55,38 @@
       "reported_count": 73,
       "added_at": "2024-01-03T00:00:00Z",
       "source": "imported"
+    },
+    {
+      "upi_id": "scammer@paytm",
+      "tags": ["fake_merchant", "advance_fee", "impersonation"],
+      "severity": "critical",
+      "reported_count": 142,
+      "added_at": "2024-01-04T00:00:00Z",
+      "source": "reported"
+    },
+    {
+      "upi_id": "fake.merchant@upi",
+      "tags": ["fake_merchant", "payment_fraud"],
+      "severity": "high",
+      "reported_count": 89,
+      "added_at": "2024-01-04T00:00:00Z",
+      "source": "reported"
+    },
+    {
+      "upi_id": "urgent-verify@ok",
+      "tags": ["fake_kyc", "impersonation"],
+      "severity": "high",
+      "reported_count": 67,
+      "added_at": "2024-01-05T00:00:00Z",
+      "source": "reported"
+    },
+    {
+      "upi_id": "prize.winner@ybl",
+      "tags": ["lottery_scam", "advance_fee"],
+      "severity": "critical",
+      "reported_count": 54,
+      "added_at": "2024-01-05T00:00:00Z",
+      "source": "reported"
     }
   ],
   "urls": [

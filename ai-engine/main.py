@@ -9,6 +9,8 @@ Routes
   POST /check-url             — URL phishing / malware check
   POST /check-upi             — UPI ID fraud check
   POST /score-event           — generic multi-signal scoring (primary route)
+  POST /analyze-audio         — file upload → Whisper → scam detection
+  POST /analyze-audio-b64     — base64 audio → Whisper → scam detection
 
   GET  /health                — liveness probe
   GET  /stats                 — DB + engine stats (great for demo dashboard)
@@ -24,10 +26,13 @@ from __future__ import annotations
 
 import logging
 import time
+import tempfile
+import os
+import base64
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -37,6 +42,8 @@ from backend.integrations import IntegrationClients
 from models.fraud import DataSource, FraudPhoneNumber, FraudUPIId, FraudURL, Severity
 from models.scoring import Action, ScoringInput, ScoringResult, ShieldSource
 from scorer import compute_score
+from speech_to_text import transcribe_audio_file, transcribe_audio
+from scam_detector import detect_scam
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -56,7 +63,6 @@ logger = logging.getLogger("sentinelos")
 async def lifespan(app: FastAPI):
     logger.info("🛡  SentinelOS Threat Engine starting…")
     await init_db()
-    # Integrations auto-select Mock vs Real based on env vars
     app.state.integrations = IntegrationClients.from_env()
     logger.info("✅  Fraud DB loaded. Integrations ready.")
     yield
@@ -80,12 +86,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten to your Android app origin in production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Request timing middleware — useful for demo + performance logging
 @app.middleware("http")
 async def add_timing_header(request: Request, call_next):
     start = time.perf_counter()
@@ -97,10 +102,6 @@ async def add_timing_header(request: Request, call_next):
     return response
 
 
-# Shared scorer instance (stateless — safe to reuse)
-
-
-
 # ---------------------------------------------------------------------------
 # Request / response schemas
 # ---------------------------------------------------------------------------
@@ -108,7 +109,6 @@ async def add_timing_header(request: Request, call_next):
 class CheckNumberRequest(BaseModel):
     number: str = Field(..., examples=["+919999999999"],
                         description="Phone number (E.164 or 10-digit Indian)")
-    # Optional call-time signals — send what you know
     otp_requested:     bool = False
     upi_pin_requested: bool = False
     urgency_language:  bool = False
@@ -119,21 +119,16 @@ class CheckNumberRequest(BaseModel):
 
 class CheckURLRequest(BaseModel):
     url: str = Field(..., examples=["http://fake-sbi-kyc.com/login"])
-    url_flagged_external: bool = False   # set True if VirusTotal/SafeBrowsing already flagged it
+    url_flagged_external: bool = False
     url_is_phishing:      bool = False
 
 
 class CheckUPIRequest(BaseModel):
     upi_id: str = Field(..., examples=["scammer@ybl"])
-    upi_copied_on_call: bool = False     # True = killer combo — auto BLOCK
+    upi_copied_on_call: bool = False
 
 
 class ScoreEventRequest(BaseModel):
-    """
-    Generic multi-signal endpoint.
-    Any shield can POST all its signals in one shot.
-    The scorer combines everything and returns one verdict.
-    """
     source: ShieldSource = ShieldSource.manual
     signals: ScoringInput
 
@@ -146,8 +141,16 @@ class ReportRequest(BaseModel):
     notes:       Optional[str] = None
 
 
+# ── NEW: Audio analysis schemas ───────────────────────────────────────────────
+
+class AudioBase64Request(BaseModel):
+    audio_base64: str
+    language: str = "en"
+    number: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
-# Utility: build ScoringInput from DB result + request fields
+# Utility
 # ---------------------------------------------------------------------------
 
 def _make_input_from_db(result, extra: dict, source: ShieldSource) -> ScoringInput:
@@ -161,22 +164,47 @@ def _make_input_from_db(result, extra: dict, source: ShieldSource) -> ScoringInp
     )
 
 
+def _build_audio_response(transcript_result: dict, filename: str = "") -> dict:
+    """Shared helper — runs scam detection on transcript and builds response."""
+    transcript = transcript_result.get("transcript", "")
+
+    if not transcript.strip():
+        return {
+            "transcript": "",
+            "language": transcript_result.get("language", "en"),
+            "confidence": 0.0,
+            "segments": [],
+            "scam": False,
+            "type": None,
+            "risk_score": 0,
+            "signals": [],
+            "explanation": "No speech detected in audio.",
+            "filename": filename,
+        }
+
+    scam = detect_scam(transcript)
+
+    return {
+        "transcript": transcript,
+        "language": transcript_result.get("language", "en"),
+        "confidence": transcript_result.get("confidence", 0.0),
+        "segments": transcript_result.get("segments", []),
+        "filename": filename,
+        **scam,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @app.get("/health", tags=["System"])
 async def health():
-    """Liveness probe — always returns 200 if the server is up."""
     return {"status": "ok", "service": "sentinelos-threat-engine"}
 
 
 @app.get("/stats", tags=["System"])
 async def stats(db: FraudDB = Depends(get_db)):
-    """
-    Returns DB entry counts.
-    Great to show on the hackathon demo dashboard.
-    """
     return {
         "status": "ok",
         "database": db.stats(),
@@ -199,18 +227,9 @@ async def check_number(
     db: FraudDB = Depends(get_db),
     integrations: IntegrationClients = Depends(get_integrations),
 ):
-    """
-    **Call Shield** — check a phone number and optional call-time signals.
+    db_result = await db.lookup_phone(req.number)
+    tc_result = await integrations.truecaller.lookup(req.number)
 
-    - Looks up number in fraud DB
-    - Enriches with Truecaller spam intelligence
-    - Combines with call signals (OTP request, urgency language, etc.)
-    - Returns score + action + reasons
-    """
-    db_result      = await db.lookup_phone(req.number)
-    tc_result      = await integrations.truecaller.lookup(req.number)
-
-    # Truecaller spam score boosts unknown_number signal
     unknown = req.unknown_number or (not tc_result.name and tc_result.spam_score == 0)
 
     signals = _make_input_from_db(
@@ -234,50 +253,38 @@ async def check_number(
 # ------------------------------------------------------------------
 # /check-url
 # ------------------------------------------------------------------
+
 @app.post("/check-url", response_model=ScoringResult, tags=["Shields"])
 async def check_url(
     req: CheckURLRequest,
     db: FraudDB = Depends(get_db),
     integrations: IntegrationClients = Depends(get_integrations),
 ):
-    # 🔹 DB
     db_result = await db.lookup_url(req.url)
 
-    # 🔹 YOUR AI ENGINE
     from url_analyzer import analyze_url
     ai_result = analyze_url(req.url)
 
     ai_flagged = len(ai_result["signals"]) > 0
-
     ai_phishing = any(
         any(keyword in s["detail"].lower() for keyword in ["phishing", "social_engineering", "malware"])
         for s in ai_result["signals"]
     )
 
-    # 🔹 FINAL SIGNALS
     signals = _make_input_from_db(
         db_result,
         source=ShieldSource.link_shield,
         extra={
             "url_flagged_external": ai_flagged,
             "url_is_phishing": ai_phishing,
-            
         },
     )
 
     result = compute_score(signals)
-
-    logger.info(
-        "check-url %s → %s (score=%d) [AI_flagged=%s phishing=%s DB_hit=%s]",
-        req.url,
-        result.action,
-        result.score,
-        ai_flagged,
-        ai_phishing,
-        db_result.found
-    )
-
+    logger.info("check-url %s → %s (score=%d) [AI_flagged=%s phishing=%s DB_hit=%s]",
+                req.url, result.action, result.score, ai_flagged, ai_phishing, db_result.found)
     return result
+
 
 # ------------------------------------------------------------------
 # /check-upi
@@ -288,51 +295,33 @@ async def check_upi(
     req: CheckUPIRequest,
     db: FraudDB = Depends(get_db),
 ):
-    """
-    **UPI Shield** — check a UPI ID.
-
-    Set `upi_copied_on_call=true` to trigger the **killer combo**:
-    UPI ID copied while on an active unknown call → automatic BLOCK.
-    """
     db_result = await db.lookup_upi(req.upi_id)
 
-    # 🔹 BASIC AI DETECTION
     upi = req.upi_id.lower()
-
-    suspicious_keywords = [
-        "prize", "winner", "reward", "cashback",
-        "offer", "urgent", "bonus", "loan"
-    ]
+    suspicious_keywords = ["prize", "winner", "reward", "cashback", "offer", "urgent", "bonus", "loan"]
+    high_risk_patterns  = ["prize", "winner", "lottery", "reward"]
 
     is_suspicious = any(k in upi for k in suspicious_keywords)
-
-# 🚨 HIGH RISK patterns
-    high_risk_patterns = ["prize", "winner", "lottery", "reward"]
-
-    is_high_risk = any(k in upi for k in high_risk_patterns)
-
+    is_high_risk  = any(k in upi for k in high_risk_patterns)
     has_random_numbers = any(char.isdigit() for char in upi)
+
     signals = _make_input_from_db(
         db_result,
         source=ShieldSource.upi_shield,
         extra={
             "upi_copied_on_call": req.upi_copied_on_call,
-
-            "urgency_language": is_suspicious,
-            "unknown_number": has_random_numbers,
-
-        # 🔥 NEW
-            "otp_requested": is_high_risk,
+            "urgency_language":   is_suspicious,
+            "unknown_number":     has_random_numbers,
+            "otp_requested":      is_high_risk,
         },
     )
     result = compute_score(signals)
-    logger.info("check-upi %s → %s (score=%d)", req.upi_id,
-                result.action, result.score)
+    logger.info("check-upi %s → %s (score=%d)", req.upi_id, result.action, result.score)
     return result
 
 
 # ------------------------------------------------------------------
-# /score-event  (primary route — all shields can use this)
+# /score-event
 # ------------------------------------------------------------------
 
 @app.post("/score-event", response_model=ScoringResult, tags=["Shields"])
@@ -340,33 +329,10 @@ async def score_event(
     req: ScoreEventRequest,
     db: FraudDB = Depends(get_db),
 ):
-    """
-    **Generic multi-signal scoring.**
-
-    Send any combination of signals from any shield.
-    The engine combines them into one verdict.
-
-    Example — a call where number is in DB + OTP requested + urgency detected:
-    ```json
-    {
-      "source": "call_shield",
-      "signals": {
-        "fraud_db_hit": true,
-        "db_severity": "high",
-        "db_tags": ["otp_scam"],
-        "otp_requested": true,
-        "urgency_language": true,
-        "unknown_number": true
-      }
-    }
-    ```
-    """
-    # Allow caller to pass entity_value for an optional DB re-lookup
     signals = req.signals
     signals.source = req.source
 
     if signals.entity_value and not signals.fraud_db_hit:
-        # Auto-lookup based on source type
         if req.source == ShieldSource.call_shield:
             db_result = await db.lookup_phone(signals.entity_value)
         elif req.source == ShieldSource.upi_shield:
@@ -382,9 +348,71 @@ async def score_event(
             signals.db_tags      = db_result.tags
 
     result = compute_score(signals)
-    logger.info("score-event [%s] → %s (score=%d)", req.source,
-                result.action, result.score)
+    logger.info("score-event [%s] → %s (score=%d)", req.source, result.action, result.score)
     return result
+
+
+# ------------------------------------------------------------------
+# /analyze-audio-b64  — base64 audio from browser mic recording
+# ------------------------------------------------------------------
+
+@app.post("/analyze-audio-b64", tags=["Shields"])
+async def analyze_audio_base64(req: AudioBase64Request):
+    """
+    Accepts base64-encoded audio (WebM from MediaRecorder).
+    Used by React mic recording tab.
+    Returns: transcript + scam detection result.
+    """
+    try:
+        transcript_result = transcribe_audio(req.audio_base64, req.language)
+        return _build_audio_response(transcript_result)
+    except Exception as e:
+        logger.error("analyze-audio-b64 error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------
+# /analyze-audio  — file upload (MP3, WAV, M4A etc.)
+# ------------------------------------------------------------------
+
+@app.post("/analyze-audio", tags=["Shields"])
+async def analyze_audio_file(
+    file: UploadFile = File(...),
+    language: str = Form(default="en"),
+    number: str = Form(default=""),
+):
+    """
+    Accepts multipart audio file upload.
+    Used by React file upload tab.
+    Supports: mp3, wav, m4a, ogg, flac, webm, mp4.
+    Returns: transcript + scam detection result.
+    """
+    allowed = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mp4"}
+    ext = os.path.splitext(file.filename or "")[1].lower()
+
+    if ext not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(allowed)}"
+        )
+
+    contents = await file.read()
+
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    try:
+        transcript_result = transcribe_audio_file(tmp_path)
+        response = _build_audio_response(transcript_result, filename=file.filename or "")
+        logger.info("analyze-audio %s → scam=%s score=%d",
+                    file.filename, response.get("scam"), response.get("risk_score"))
+        return response
+    except Exception as e:
+        logger.error("analyze-audio error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        os.unlink(tmp_path)
 
 
 # ------------------------------------------------------------------
@@ -393,20 +421,12 @@ async def score_event(
 
 @app.post("/admin/reload", tags=["Admin"])
 async def reload_db(db: FraudDB = Depends(get_db)):
-    """
-    Hot-reload the fraud database from disk — no restart needed.
-    Great for live demos: add a new scam number to fraud_data.json,
-    hit this endpoint, and the next check picks it up immediately.
-    """
     await db.reload()
-    return {
-        "status": "reloaded",
-        "database": db.stats(),
-    }
+    return {"status": "reloaded", "database": db.stats()}
 
 
 # ------------------------------------------------------------------
-# /admin/report  (community reporting)
+# /admin/report
 # ------------------------------------------------------------------
 
 @app.post("/admin/report", status_code=status.HTTP_201_CREATED, tags=["Admin"])
@@ -414,36 +434,26 @@ async def report_entity(
     req: ReportRequest,
     db: FraudDB = Depends(get_db),
 ):
-    """
-    Community report — add a new fraud entity to the live index.
-
-    Survives until server restart (use /admin/reload after also saving
-    to fraud_data.json for persistence).
-    """
     try:
         if req.entity_type == "phone_number":
             await db.add_phone(FraudPhoneNumber(
                 number=req.value, tags=req.tags,
-                severity=req.severity, source=DataSource.reported,
-                notes=req.notes,
+                severity=req.severity, source=DataSource.reported, notes=req.notes,
             ))
         elif req.entity_type == "upi_id":
             await db.add_upi(FraudUPIId(
                 upi_id=req.value, tags=req.tags,
-                severity=req.severity, source=DataSource.reported,
-                notes=req.notes,
+                severity=req.severity, source=DataSource.reported, notes=req.notes,
             ))
         elif req.entity_type == "url":
             await db.add_url(FraudURL(
                 url=req.value, tags=req.tags,
-                severity=req.severity, source=DataSource.reported,
-                notes=req.notes,
+                severity=req.severity, source=DataSource.reported, notes=req.notes,
             ))
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown entity_type '{req.entity_type}'. "
-                       f"Use: phone_number, upi_id, url",
+                detail=f"Unknown entity_type '{req.entity_type}'. Use: phone_number, upi_id, url",
             )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
