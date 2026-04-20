@@ -1,0 +1,24 @@
+# SentinelOS AI Engine — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Web framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+
+# Speech to text — runs 100% locally, completely free
+# First run auto-downloads the model (~140MB for 'base')
+openai-whisper==20231117
+
+# Whisper dependencies
+torch
+numpy
+tqdm
+more-itertools
+ffmpeg-python
+
+# HTTP client for optional free API calls (VirusTotal, Safe Browsing)
+httpx==0.27.0
+
+# Env variable loading
+python-dotenv==1.0.1
