@@ -105,11 +105,11 @@ const AudioResultCard = ({ result }: { result: AudioAnalysisResult }) => {
           "{result.transcript || "No speech detected."}"
         </p>
       </div>
-      {result.segments.length > 0 && (
+      {(result.segments?.length || 0) > 0 && (
         <div className="bg-white rounded-xl p-4 shadow-sm">
           <p className="text-xs text-gray-500 mb-2">Segments ({result.segments.length})</p>
           <div className="space-y-1 max-h-40 overflow-y-auto">
-            {result.segments.map((seg, i) => (
+            {(result.segments || []).map((seg, i) => (
               <div key={i} className="flex gap-2 text-xs">
                 <span className="text-gray-400 w-12 flex-shrink-0">{seg.start.toFixed(1)}s</span>
                 <span className="text-gray-700">{seg.text}</span>
